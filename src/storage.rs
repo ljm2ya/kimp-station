@@ -1,52 +1,102 @@
-use sqlx::{sqlite::{SqlitePoolOptions, SqliteConnectOptions}, Pool, Sqlite};
+use sqlx::{postgres::PgPoolOptions, Pool, Postgres};
 use std::error::Error;
-use std::str::FromStr;
 use crate::types::OrderbookSnapshot;
 
 pub struct Db {
-    pool: Pool<Sqlite>,
+    pool: Pool<Postgres>,
 }
 
 impl Db {
-    pub async fn new(path: &str) -> Result<Self, Box<dyn Error>> {
-        let options = SqliteConnectOptions::from_str(&format!("sqlite:{}", path))?
-            .create_if_missing(true);
-
-        let pool = SqlitePoolOptions::new()
+    pub async fn new(database_url: &str) -> Result<Self, Box<dyn Error>> {
+        let pool = PgPoolOptions::new()
             .max_connections(5)
-            .connect_with(options)
+            .connect(database_url)
             .await?;
 
+        // Enable TimescaleDB extension
+        sqlx::query("CREATE EXTENSION IF NOT EXISTS timescaledb CASCADE;")
+            .execute(&pool)
+            .await?;
+
+        // Create regular table first
         sqlx::query(
             r#"
             CREATE TABLE IF NOT EXISTS snapshots (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                timestamp INTEGER,
-                source TEXT,
-                symbol TEXT,
-                data TEXT
+                time TIMESTAMPTZ NOT NULL,
+                timestamp BIGINT NOT NULL,
+                source VARCHAR(50) NOT NULL,
+                symbol VARCHAR(50) NOT NULL,
+                data JSONB NOT NULL
             );
             "#,
         )
         .execute(&pool)
         .await?;
 
+        // Convert to hypertable with 24-hour chunks
+        // Use DO block to handle "already a hypertable" error gracefully
+        sqlx::query(
+            r#"
+            DO $$
+            BEGIN
+                IF NOT EXISTS (
+                    SELECT 1 FROM timescaledb_information.hypertables
+                    WHERE hypertable_name = 'snapshots'
+                ) THEN
+                    PERFORM create_hypertable('snapshots', 'time', chunk_time_interval => INTERVAL '24 hours');
+                END IF;
+            END $$;
+            "#,
+        )
+        .execute(&pool)
+        .await?;
+
+        // Create indexes
+        sqlx::query("CREATE INDEX IF NOT EXISTS idx_snapshots_timestamp ON snapshots (timestamp);")
+            .execute(&pool)
+            .await?;
+
+        sqlx::query("CREATE INDEX IF NOT EXISTS idx_snapshots_source ON snapshots (source);")
+            .execute(&pool)
+            .await?;
+
+        sqlx::query("CREATE INDEX IF NOT EXISTS idx_snapshots_symbol ON snapshots (symbol);")
+            .execute(&pool)
+            .await?;
+
+        // Enable compression on chunks older than 7 days
+        sqlx::query(
+            r#"
+            SELECT add_compression_policy('snapshots', INTERVAL '7 days', if_not_exists => true);
+            "#,
+        )
+        .execute(&pool)
+        .await
+        .ok(); // Ignore errors if policy already exists
+
+        println!("✅ TimescaleDB initialized with 24h chunks and compression enabled");
+
         Ok(Db { pool })
     }
 
     pub async fn save_snapshot(&self, ob: &OrderbookSnapshot) -> Result<(), Box<dyn Error>> {
-        // Optimize: Only store asks/bids in JSON since other fields are in columns
+        // Convert timestamp (milliseconds) to TIMESTAMPTZ
+        let time = chrono::DateTime::from_timestamp_millis(ob.timestamp)
+            .unwrap_or_else(|| chrono::Utc::now());
+
+        // Store asks/bids as JSONB for efficient querying
         let data_json = serde_json::json!({
             "asks": ob.asks,
             "bids": ob.bids
-        }).to_string();
+        });
 
         sqlx::query(
             r#"
-            INSERT INTO snapshots (timestamp, source, symbol, data)
-            VALUES (?, ?, ?, ?)
+            INSERT INTO snapshots (time, timestamp, source, symbol, data)
+            VALUES ($1, $2, $3, $4, $5)
             "#,
         )
+        .bind(time)
         .bind(ob.timestamp)
         .bind(&ob.name)
         .bind(&ob.symbol)

@@ -20,6 +20,7 @@ const TR_NIGHTTIME_FUTURES_ORDERBOOK: &str = "H0MFASP0";
 
 pub async fn subscribe(
     futures_code: String,
+    tr_id: &str,
     db: Arc<Db>,
 ) -> Result<(), Box<dyn Error>> {
     let api_key = env::var("KINVEST_API_KEY").unwrap_or_default();
@@ -30,32 +31,61 @@ pub async fn subscribe(
         return Ok(());
     }
 
+    let futures_code = futures_code.clone();
+    let tr_id = tr_id.to_string();
+
+    tokio::spawn(async move {
+        loop {
+            println!("[Kinvest] Connecting to {} (TR_ID: {})...", futures_code, tr_id);
+
+            // Attempt connection
+            match connect_and_handle(&api_key, &secret_key, &futures_code, &tr_id, &db).await {
+                Ok(_) => {
+                    println!("[Kinvest] Connection closed cleanly. Reconnecting in 5s...");
+                }
+                Err(e) => {
+                    eprintln!("[Kinvest] Connection error: {}. Reconnecting in 5s...", e);
+                }
+            }
+
+            tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+        }
+    });
+
+    Ok(())
+}
+
+async fn connect_and_handle(
+    api_key: &str,
+    secret_key: &str,
+    futures_code: &str,
+    tr_id: &str,
+    db: &Arc<Db>,
+) -> Result<(), Box<dyn Error>> {
     let is_mock = false;  
     let base_url = if is_mock { "https://openapivts.koreainvestment.com:29443" } else { "https://openapi.koreainvestment.com:9443" };
     let ws_url = if is_mock { WS_URL_MOCK } else { WS_URL_REAL };
 
     // Get Approval Key
-    let approval_key = get_approval_key(base_url, &api_key, &secret_key).await?;
-    println!("Got Kinvest Approval Key: {}", approval_key);
-
+    let approval_key = get_approval_key(base_url, api_key, secret_key).await?;
+    
     let url = Url::parse(ws_url)?;
-    let (ws_stream, _) = connect_async(url).await?;
+    let (ws_stream, _) = utils::connect_async_with_retry(url).await?;
     let (mut write, mut read) = ws_stream.split();
 
-    // Create a channel to send messages to the WebSocket writer
+    // Channel for writing to WS
     let (tx, mut rx) = mpsc::channel::<Message>(32);
 
     // Spawn writer task
-    tokio::spawn(async move {
+    let write_task = tokio::spawn(async move {
         while let Some(msg) = rx.recv().await {
-            if let Err(e) = write.send(msg).await {
-                eprintln!("Kinvest write error: {}", e);
+            if write.send(msg).await.is_err() {
                 break;
             }
         }
     });
 
-    // Subscribe
+    // Subscribe frame
     let req_body = json!({
         "header": {
             "approval_key": approval_key,
@@ -65,44 +95,50 @@ pub async fn subscribe(
         },
         "body": {
             "input": {
-                "tr_id": TR_NIGHTTIME_FUTURES_ORDERBOOK,
+                "tr_id": tr_id,
                 "tr_key": futures_code
             }
         }
     });
 
     tx.send(Message::Text(req_body.to_string())).await?;
-    println!("Subscribed to Kinvest: {}", futures_code);
+    println!("[Kinvest] Subscribed to {} (TR_ID: {})", futures_code, tr_id);
 
-    // Reader task
+    // Reader loop
     let tx_reader = tx.clone();
-    tokio::spawn(async move {
-        while let Some(msg) = read.next().await {
-            match msg {
-                Ok(Message::Text(text)) => {
-                    handle_msg(&text, &futures_code, &db, &tx_reader).await;
-                }
-                Ok(Message::Binary(data)) => {
-                    // Try to decode as UTF-8
-                    if let Ok(text) = String::from_utf8(data) {
-                        handle_msg(&text, &futures_code, &db, &tx_reader).await;
-                    }
-                }
-                Ok(Message::Close(frame)) => {
-                    println!("[Kinvest] Connection closed: {:?}", frame);
-                    break;
-                }
-                Err(e) => {
-                    eprintln!("[Kinvest] WebSocket error: {}", e);
-                    break;
-                }
-                _ => {}
+    
+    while let Some(msg) = read.next().await {
+        match msg {
+            Ok(Message::Text(text)) => {
+                handle_msg(&text, futures_code, db, &tx_reader).await;
             }
+            Ok(Message::Binary(data)) => {
+                 if let Ok(text) = String::from_utf8(data) {
+                    handle_msg(&text, futures_code, db, &tx_reader).await;
+                }
+            }
+            Ok(Message::Close(_)) => return Ok(()),
+            Ok(Message::Ping(_)) => {
+                 let _ = tx_reader.send(Message::Pong(vec![])).await;
+            }, 
+            Err(e) => return Err(Box::new(e)),
+            _ => {}
         }
-        println!("[Kinvest] Reader task ended");
-    });
-
+    }
+    
+    // Ensure writer task is aborted if reader ends
+    write_task.abort();
+    
     Ok(())
+}
+
+// Helper for connect logic since we need it in the loop
+mod utils {
+    use super::*;
+    pub async fn connect_async_with_retry(url: Url) -> Result<(tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>, tokio_tungstenite::tungstenite::handshake::client::Response), Box<dyn Error>> {
+        let (ws_stream, response) = connect_async(url).await?;
+        Ok((ws_stream, response))
+    }
 }
 
 async fn get_approval_key(base_url: &str, app_key: &str, secret_key: &str) -> Result<String, Box<dyn Error>> {

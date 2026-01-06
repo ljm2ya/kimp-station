@@ -2,3 +2,6 @@
 .env
 go_impl
 *.db
+
+.postgres-data/
+.postgres-socket/
