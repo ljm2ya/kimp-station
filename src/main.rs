@@ -28,22 +28,27 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     // Get Kinvest configuration
     let futures_code = env::var("KINVEST_FUTURES_CODE").unwrap_or_else(|_| "A75601".to_string());
+    
+    // Fetch approval key once to be shared across connections
+    // This prevents race conditions where generating a new key invalidates the previous one
+    let approval_key = match kinvest::fetch_approval_key().await {
+        Ok(key) => key,
+        Err(e) => {
+            eprintln!("[Kinvest] Failed to fetch approval key: {}", e);
+            String::new()
+        }
+    };
 
     // Subscribe to both day and night markets
     // The server will only send data during active market hours
     println!("[Kinvest] Subscribing to both day and night markets...");
 
-    // Day market subscription
-    let db_day = db.clone();
-    let futures_code_day = futures_code.clone();
-    if let Err(e) = kinvest::subscribe(futures_code_day, "H0CFASP0", db_day).await {
-        eprintln!("[Kinvest] Day market subscription error: {}", e);
-    }
+    let mut subscriptions = Vec::new();
+    subscriptions.push((futures_code.clone(), "H0CFASP0".to_string())); // Day
+    subscriptions.push((futures_code.clone(), "H0MFASP0".to_string())); // Night
 
-    // Night market subscription
-    let db_night = db.clone();
-    if let Err(e) = kinvest::subscribe(futures_code, "H0MFASP0", db_night).await {
-        eprintln!("[Kinvest] Night market subscription error: {}", e);
+    if let Err(e) = kinvest::start_stream(subscriptions, db.clone(), approval_key).await {
+        eprintln!("[Kinvest] Subscription stream error: {}", e);
     }
 
     println!("Station running. Press Ctrl+C to stop.");

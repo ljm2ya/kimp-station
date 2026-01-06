@@ -18,28 +18,40 @@ const WS_URL_MOCK: &str = "ws://ops.koreainvestment.com:31000";
 const TR_COMMODITY_FUTURES_ORDERBOOK: &str = "H0CFASP0";
 const TR_NIGHTTIME_FUTURES_ORDERBOOK: &str = "H0MFASP0";
 
-pub async fn subscribe(
-    futures_code: String,
-    tr_id: &str,
-    db: Arc<Db>,
-) -> Result<(), Box<dyn Error>> {
+pub async fn fetch_approval_key() -> Result<String, Box<dyn Error>> {
     let api_key = env::var("KINVEST_API_KEY").unwrap_or_default();
     let secret_key = env::var("KINVEST_SECRET_KEY").unwrap_or_default();
     
     if api_key.is_empty() {
-        println!("KINVEST_API_KEY not set, skipping Kinvest subscription");
+        return Err("KINVEST_API_KEY not set".into());
+    }
+
+    let is_mock = false;
+    let base_url = if is_mock { "https://openapivts.koreainvestment.com:29443" } else { "https://openapi.koreainvestment.com:9443" };
+    
+    get_approval_key(base_url, &api_key, &secret_key).await
+}
+
+pub async fn start_stream(
+    subscriptions: Vec<(String, String)>, // (futures_code, tr_id)
+    db: Arc<Db>,
+    approval_key: String,
+) -> Result<(), Box<dyn Error>> {
+    if approval_key.is_empty() {
+        println!("Approval key is empty, skipping Kinvest subscription");
         return Ok(());
     }
 
-    let futures_code = futures_code.clone();
-    let tr_id = tr_id.to_string();
+    // Clone for the loop
+    let subscriptions = Arc::new(subscriptions);
+    let approval_key = approval_key.clone();
 
     tokio::spawn(async move {
         loop {
-            println!("[Kinvest] Connecting to {} (TR_ID: {})...", futures_code, tr_id);
+            println!("[Kinvest] Connecting with {} subscriptions...", subscriptions.len());
 
             // Attempt connection
-            match connect_and_handle(&api_key, &secret_key, &futures_code, &tr_id, &db).await {
+            match connect_and_handle(&subscriptions, &db, &approval_key).await {
                 Ok(_) => {
                     println!("[Kinvest] Connection closed cleanly. Reconnecting in 5s...");
                 }
@@ -56,19 +68,13 @@ pub async fn subscribe(
 }
 
 async fn connect_and_handle(
-    api_key: &str,
-    secret_key: &str,
-    futures_code: &str,
-    tr_id: &str,
+    subscriptions: &[(String, String)],
     db: &Arc<Db>,
+    approval_key: &str,
 ) -> Result<(), Box<dyn Error>> {
     let is_mock = false;  
-    let base_url = if is_mock { "https://openapivts.koreainvestment.com:29443" } else { "https://openapi.koreainvestment.com:9443" };
     let ws_url = if is_mock { WS_URL_MOCK } else { WS_URL_REAL };
 
-    // Get Approval Key
-    let approval_key = get_approval_key(base_url, api_key, secret_key).await?;
-    
     let url = Url::parse(ws_url)?;
     let (ws_stream, _) = utils::connect_async_with_retry(url).await?;
     let (mut write, mut read) = ws_stream.split();
@@ -85,24 +91,29 @@ async fn connect_and_handle(
         }
     });
 
-    // Subscribe frame
-    let req_body = json!({
-        "header": {
-            "approval_key": approval_key,
-            "custtype": "P",
-            "tr_type": "1",
-            "content-type": "utf-8"
-        },
-        "body": {
-            "input": {
-                "tr_id": tr_id,
-                "tr_key": futures_code
+    // Send all subscriptions
+    for (futures_code, tr_id) in subscriptions {
+        let req_body = json!({
+            "header": {
+                "approval_key": approval_key,
+                "custtype": "P",
+                "tr_type": "1",
+                "content-type": "utf-8"
+            },
+            "body": {
+                "input": {
+                    "tr_id": tr_id,
+                    "tr_key": futures_code
+                }
             }
-        }
-    });
+        });
 
-    tx.send(Message::Text(req_body.to_string())).await?;
-    println!("[Kinvest] Subscribed to {} (TR_ID: {})", futures_code, tr_id);
+        tx.send(Message::Text(req_body.to_string())).await?;
+        println!("[Kinvest] Subscribed to {} (TR_ID: {})", futures_code, tr_id);
+        
+        // Small delay to prevent rate limiting issues during burst subscription
+        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+    }
 
     // Reader loop
     let tx_reader = tx.clone();
@@ -110,11 +121,11 @@ async fn connect_and_handle(
     while let Some(msg) = read.next().await {
         match msg {
             Ok(Message::Text(text)) => {
-                handle_msg(&text, futures_code, db, &tx_reader).await;
+                handle_msg(&text, db, &tx_reader).await;
             }
             Ok(Message::Binary(data)) => {
                  if let Ok(text) = String::from_utf8(data) {
-                    handle_msg(&text, futures_code, db, &tx_reader).await;
+                    handle_msg(&text, db, &tx_reader).await;
                 }
             }
             Ok(Message::Close(_)) => return Ok(()),
@@ -160,7 +171,7 @@ async fn get_approval_key(base_url: &str, app_key: &str, secret_key: &str) -> Re
     }
 }
 
-async fn handle_msg(text: &str, code: &str, db: &Arc<Db>, tx: &mpsc::Sender<Message>) {
+async fn handle_msg(text: &str, db: &Arc<Db>, tx: &mpsc::Sender<Message>) {
     // Try to parse as JSON first (modern KIS API format)
     if text.trim().starts_with('{') {
         if let Ok(json_msg) = serde_json::from_str::<Value>(text) {
@@ -170,7 +181,7 @@ async fn handle_msg(text: &str, code: &str, db: &Arc<Db>, tx: &mpsc::Sender<Mess
                     let pong_response = json!({
                         "header": { "tr_id": "PINGPONG" }
                     });
-                    if let Err(e) = tx.send(Message::Text(pong_response.to_string())).await {
+                     if let Err(e) = tx.send(Message::Text(pong_response.to_string())).await {
                         eprintln!("[Kinvest] Failed to send PINGPONG response: {}", e);
                     }
                     return;
@@ -180,6 +191,9 @@ async fn handle_msg(text: &str, code: &str, db: &Arc<Db>, tx: &mpsc::Sender<Mess
                 if let Some(body) = json_msg["body"].as_object() {
                     if body.contains_key("msg1") && body["msg1"].as_str() == Some("SUBSCRIBE SUCCESS") {
                         println!("[Kinvest] ✅ Subscription confirmed (TR_ID: {})", tr_id);
+                    } else if body.contains_key("msg1") {
+                         // Print other messages (like errors)
+                         println!("Message: {}", text);
                     }
                 }
             }
@@ -207,6 +221,8 @@ async fn handle_msg(text: &str, code: &str, db: &Arc<Db>, tx: &mpsc::Sender<Mess
         // 5 levels * 6 blocks = 30 fields.
         // + code + time = 32 fields minimum.
         if data_fields.len() >= 32 {
+            let extracted_code = data_fields[0]; // Code is the first field
+
             let mut asks = Vec::new();
             let mut bids = Vec::new();
 
@@ -215,13 +231,9 @@ async fn handle_msg(text: &str, code: &str, db: &Arc<Db>, tx: &mpsc::Sender<Mess
             // 1: Time
             // Block 1 (2..6): Ask Price x 5
             // Block 2 (7..11): Bid Price x 5
-            // Block 3 (12..16): Ask Total Count x 5 (Ignored)
-            // Block 4 (17..21): Bid Total Count x 5 (Ignored)
-            // Block 5 (22..26): Ask Remain (Size) x 5
-            // Block 6 (27..31): Bid Remain (Size) x 5
             
             for i in 0..5 {
-                // Asks: Price from Block 1, Size from Block 5
+                // Asks: Price from Block 1 (idx 2), Size from Block 5 (idx 22)
                 let ap_idx = 2 + i;
                 let as_idx = 22 + i;
                 
@@ -231,7 +243,7 @@ async fn handle_msg(text: &str, code: &str, db: &Arc<Db>, tx: &mpsc::Sender<Mess
                     }
                 }
 
-                // Bids: Price from Block 2, Size from Block 6
+                // Bids: Price from Block 2 (idx 7), Size from Block 6 (idx 27)
                 let bp_idx = 7 + i;
                 let bs_idx = 27 + i;
                 
@@ -247,7 +259,7 @@ async fn handle_msg(text: &str, code: &str, db: &Arc<Db>, tx: &mpsc::Sender<Mess
             let standardized = OrderbookSnapshot {
                 name: "kinvest".to_string(),
                 timestamp,
-                symbol: code.to_string(),
+                symbol: extracted_code.to_string(),
                 asks,
                 bids,
             };
