@@ -17,6 +17,7 @@ pkgs.mkShell {
     rust-analyzer
     rustfmt
     clippy
+    screen
 
     # Build dependencies
     pkg-config
@@ -38,8 +39,8 @@ pkgs.mkShell {
     export PGPORT="5432"
     export PGDATABASE="kimp_station"
 
-    # Cleanup on exit
-    trap 'echo ""; if [ -f "$PGDATA/postmaster.pid" ]; then echo "👋 Stopping PostgreSQL..."; pg_ctl stop -D $PGDATA -m fast; fi' EXIT
+    # Alias to stop the database manually
+    alias stop_db="pg_ctl stop -D $PGDATA -m fast"
 
     echo "🚀 Kimp Station Development Environment"
     echo "======================================="
@@ -51,6 +52,7 @@ pkgs.mkShell {
     echo "📋 Available Commands:"
     echo "  cargo run           - Run the application"
     echo "  pgcli               - Connect to Database"
+    echo "  stop_db             - Stop the PostgreSQL Database"
     echo ""
   '';
 }

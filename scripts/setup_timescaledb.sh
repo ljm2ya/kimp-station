@@ -92,9 +92,9 @@ EOF
     # Create .env
     create_env "postgresql://$DB_USER:$DB_PASSWORD@localhost:$PGPORT/$PGDATABASE?host=$PGHOST"
     
-    # Setup exit trap is handled by shell.nix
-    echo "ℹ️  Local Postgres is running."
-    echo "    (Auto-stops on shell exit, or use: pg_ctl stop -D .postgres-data)"
+    # Setup exit trap serves to keep DB running significantly for screen/tmux usage
+    echo "ℹ️  Local Postgres is running independent of shell session."
+    echo "    (Use 'stop_db' or 'pg_ctl stop -D .postgres-data' to stop it)"
 }
 
 setup_system() {
