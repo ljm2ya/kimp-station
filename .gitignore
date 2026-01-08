@@ -3,5 +3,12 @@
 go_impl
 *.db
 
+# Database data
 .postgres-data/
+.postgres-data-local/
 .postgres-socket/
+
+# Temporary files
+.tmp/
+**/*.log
+.DS_Store
