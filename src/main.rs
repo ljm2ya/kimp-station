@@ -8,12 +8,23 @@ use std::sync::Arc;
 use tokio::signal;
 use dotenv::dotenv;
 use std::env;
+use tracing::{info, error, Level};
+use tracing_subscriber::fmt::time::ChronoLocal;
 
 use crate::storage::Db;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
     dotenv().ok();
+
+    // Initialize tracing with timestamps
+    tracing_subscriber::fmt()
+        .with_timer(ChronoLocal::new("%Y-%m-%d %H:%M:%S%.3f".to_string()))
+        .with_max_level(Level::INFO)
+        .with_target(true)
+        .init();
+
+    info!("Starting kimp-station...");
 
     // Initialize DB
     let database_url = env::var("DATABASE_URL")
@@ -23,41 +34,31 @@ async fn main() -> Result<(), Box<dyn Error>> {
     // Start Upbit (runs 24/7)
     let upbit_symbols = vec!["KRW-USDT".to_string()];
     if let Err(e) = upbit::subscribe(upbit_symbols, db.clone()).await {
-        eprintln!("Failed to start Upbit: {}", e);
+        error!(error = %e, "Failed to start Upbit");
     }
 
     // Get Kinvest configuration
     let futures_code = env::var("KINVEST_FUTURES_CODE").unwrap_or_else(|_| "A75601".to_string());
-    
-    // Fetch approval key once to be shared across connections
-    // This prevents race conditions where generating a new key invalidates the previous one
-    let approval_key = match kinvest::fetch_approval_key().await {
-        Ok(key) => key,
-        Err(e) => {
-            eprintln!("[Kinvest] Failed to fetch approval key: {}", e);
-            String::new()
-        }
-    };
 
     // Subscribe to both day and night markets
-    // The server will only send data during active market hours
-    println!("[Kinvest] Subscribing to both day and night markets...");
+    // Approval key will be fetched/refreshed inside the stream loop
+    info!(futures_code = %futures_code, "Subscribing to Kinvest day and night markets");
 
     let mut subscriptions = Vec::new();
     subscriptions.push((futures_code.clone(), "H0CFASP0".to_string())); // Day
     subscriptions.push((futures_code.clone(), "H0MFASP0".to_string())); // Night
 
-    if let Err(e) = kinvest::start_stream(subscriptions, db.clone(), approval_key).await {
-        eprintln!("[Kinvest] Subscription stream error: {}", e);
+    if let Err(e) = kinvest::start_stream(subscriptions, db.clone()).await {
+        error!(error = %e, "Kinvest subscription stream error");
     }
 
-    println!("Station running. Press Ctrl+C to stop.");
+    info!("Station running. Press Ctrl+C to stop.");
     signal::ctrl_c().await?;
-    println!("\nShutting down...");
+    info!("Shutting down...");
 
     // Show database statistics
     if let Err(e) = db.get_stats().await {
-        eprintln!("Failed to get stats: {}", e);
+        error!(error = %e, "Failed to get stats");
     }
 
     Ok(())

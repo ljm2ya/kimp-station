@@ -4,17 +4,52 @@ use tokio_tungstenite::{connect_async, tungstenite::protocol::Message};
 use url::Url;
 use std::error::Error;
 use std::sync::Arc;
+use tracing::{info, warn, error, debug};
 
 use crate::types::{UpbitOrderbook, OrderbookSnapshot, OrderbookItem};
 use crate::storage::Db;
+
+const WS_URL: &str = "wss://api.upbit.com/websocket/v1";
 
 pub async fn subscribe(
     symbols: Vec<String>,
     db: Arc<Db>,
 ) -> Result<(), Box<dyn Error>> {
-    let url = Url::parse("wss://api.upbit.com/websocket/v1")?;
+    let symbols = Arc::new(symbols);
+
+    tokio::spawn(async move {
+        loop {
+            info!(
+                target: "upbit",
+                symbols = ?*symbols,
+                "Connecting to websocket..."
+            );
+
+            match connect_and_handle(&symbols, &db).await {
+                Ok(()) => {
+                    info!(target: "upbit", "Connection closed. Reconnecting in 5s...");
+                }
+                Err(e) => {
+                    error!(target: "upbit", error = %e, "Connection error. Reconnecting in 5s...");
+                }
+            }
+
+            tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+        }
+    });
+
+    Ok(())
+}
+
+async fn connect_and_handle(
+    symbols: &[String],
+    db: &Arc<Db>,
+) -> Result<(), Box<dyn Error + Send + Sync>> {
+    let url = Url::parse(WS_URL)?;
     let (ws_stream, _) = connect_async(url).await?;
     let (mut write, mut read) = ws_stream.split();
+
+    info!(target: "upbit", "Websocket connected");
 
     // Subscribe message
     let subscribe_msg = json!([
@@ -24,27 +59,35 @@ pub async fn subscribe(
     ]);
 
     write.send(Message::Text(subscribe_msg.to_string())).await?;
-    println!("Subscribed to Upbit: {:?}", symbols);
+    info!(target: "upbit", symbols = ?symbols, "Sent subscription request");
 
-    tokio::spawn(async move {
-        while let Some(msg) = read.next().await {
-            match msg {
-                Ok(Message::Text(text)) => {
-                    handle_msg(&text, &db).await;
+    while let Some(msg) = read.next().await {
+        match msg {
+            Ok(Message::Text(text)) => {
+                handle_msg(&text, db).await;
+            }
+            Ok(Message::Binary(bin)) => {
+                if let Ok(text) = String::from_utf8(bin) {
+                    handle_msg(&text, db).await;
                 }
-                Ok(Message::Binary(bin)) => {
-                    if let Ok(text) = String::from_utf8(bin) {
-                        handle_msg(&text, &db).await;
-                    }
-                }
-                Err(e) => {
-                    eprintln!("Upbit WS error: {}", e);
+            }
+            Ok(Message::Ping(data)) => {
+                if let Err(e) = write.send(Message::Pong(data)).await {
+                    error!(target: "upbit", error = %e, "Failed to send pong");
                     break;
                 }
-                _ => {}
             }
+            Ok(Message::Close(_)) => {
+                info!(target: "upbit", "Received close frame");
+                break;
+            }
+            Err(e) => {
+                error!(target: "upbit", error = %e, "Websocket error");
+                return Err(Box::new(e));
+            }
+            _ => {}
         }
-    });
+    }
 
     Ok(())
 }
@@ -55,9 +98,7 @@ async fn handle_msg(text: &str, db: &Arc<Db>) {
             // Convert to OrderbookSnapshot
             let mut asks = Vec::new();
             let mut bids = Vec::new();
-            
-            // Collect all units (truncate later if needed, but user wants unified structure)
-            // Upbit gives levels with both ask/bid in same unit
+
             for unit in ob.orderbook_units {
                 asks.push(OrderbookItem {
                     price: unit.ask_price,
@@ -68,13 +109,6 @@ async fn handle_msg(text: &str, db: &Arc<Db>) {
                     size: unit.bid_size,
                 });
             }
-            
-            // Sort Asks ascending (lowest price first - best ask)
-            // Sort Bids descending (highest price first - best bid)
-            // Upbit units usually come sorted by proximity to spread, so unit[0] is best.
-            // Asks: unit[0].ap < unit[1].ap ...
-            // Bids: unit[0].bp > unit[1].bp ...
-            // So they are already sorted by level. 
 
             // Truncate to 10 if necessary
             if asks.len() > 10 { asks.truncate(10); }
@@ -82,7 +116,6 @@ async fn handle_msg(text: &str, db: &Arc<Db>) {
 
             let standardized = OrderbookSnapshot {
                 name: "upbit".to_string(),
-                // Upbit timestamp is ms
                 timestamp: ob.timestamp,
                 symbol: ob.code.clone(),
                 asks,
@@ -90,8 +123,24 @@ async fn handle_msg(text: &str, db: &Arc<Db>) {
             };
 
             if let Err(e) = db.save_snapshot(&standardized).await {
-                eprintln!("Failed to save Upbit snapshot: {}", e);
+                error!(
+                    target: "upbit",
+                    error = %e,
+                    symbol = %ob.code,
+                    "Failed to save snapshot"
+                );
+            } else {
+                debug!(
+                    target: "upbit",
+                    symbol = %ob.code,
+                    "Saved orderbook snapshot"
+                );
             }
+        }
+    } else {
+        // Log non-orderbook messages for debugging
+        if !text.contains("\"ty\":\"orderbook\"") && !text.is_empty() {
+            warn!(target: "upbit", message = %text, "Received non-orderbook message");
         }
     }
 }

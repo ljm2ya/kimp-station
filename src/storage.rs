@@ -1,5 +1,6 @@
 use sqlx::{postgres::PgPoolOptions, Pool, Postgres};
 use std::error::Error;
+use tracing::info;
 use crate::types::OrderbookSnapshot;
 
 pub struct Db {
@@ -74,7 +75,7 @@ impl Db {
         .await
         .ok(); // Ignore errors if policy already exists
 
-        println!("✅ TimescaleDB initialized with 24h chunks and compression enabled");
+        info!(target: "storage", "TimescaleDB initialized with 24h chunks and compression enabled");
 
         Ok(Db { pool })
     }
@@ -120,17 +121,19 @@ impl Db {
         .fetch_all(&self.pool)
         .await?;
 
-        println!("\n📊 Database Statistics:");
-        println!("{}", "=".repeat(50));
+        info!(target: "storage", "Database Statistics:");
         for row in rows {
             let source: String = row.get("source");
             let count: i64 = row.get("count");
             let latest: i64 = row.get("latest");
-            println!("\n🔹 Source: {}", source);
-            println!("   Count: {}", count);
-            println!("   Latest timestamp: {}", latest);
+            info!(
+                target: "storage",
+                source = %source,
+                count = count,
+                latest_timestamp = latest,
+                "Source stats"
+            );
         }
-        println!("\n{}", "=".repeat(50));
 
         Ok(())
     }
