@@ -8,6 +8,7 @@ Real-time market data collector for **Upbit** (KRW-USDT) and **Korea Investment*
 - **Kinvest**: Dual subscription to day/night markets with server-managed hours.
 - **Storage**: TimescaleDB hypertable with 24h chunks and auto-compression.
 - **Resilience**: Heartbeat-enabled WebSocket connections.
+- **Data Quality**: Filters zero-price snapshots (market transitions) and duplicate orderbooks.
 
 ## Prerequisites
 
@@ -26,7 +27,7 @@ Real-time market data collector for **Upbit** (KRW-USDT) and **Korea Investment*
 nix-shell
 
 # 2. Copy .env.example to .env
-cp .env.exampel .env
+cp .env.example .env
 
 # 3. Add API keys
 vim .env

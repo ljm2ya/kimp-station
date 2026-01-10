@@ -180,18 +180,19 @@ async fn connect_and_handle(
     // Reader loop
     let tx_reader = tx.clone();
     let mut result = ConnectionResult::Retry;
+    let mut last_snapshot: Option<OrderbookSnapshot> = None;
 
     while let Some(msg) = read.next().await {
         match msg {
             Ok(Message::Text(text)) => {
-                if let Some(msg_result) = handle_msg(&text, db, &tx_reader).await {
+                if let Some(msg_result) = handle_msg(&text, db, &tx_reader, &mut last_snapshot).await {
                     result = msg_result;
                     break;
                 }
             }
             Ok(Message::Binary(data)) => {
                 if let Ok(text) = String::from_utf8(data) {
-                    if let Some(msg_result) = handle_msg(&text, db, &tx_reader).await {
+                    if let Some(msg_result) = handle_msg(&text, db, &tx_reader, &mut last_snapshot).await {
                         result = msg_result;
                         break;
                     }
@@ -241,7 +242,8 @@ async fn get_approval_key(base_url: &str, app_key: &str, secret_key: &str) -> Re
 async fn handle_msg(
     text: &str,
     db: &Arc<Db>,
-    tx: &mpsc::Sender<Message>
+    tx: &mpsc::Sender<Message>,
+    last_snapshot: &mut Option<OrderbookSnapshot>,
 ) -> Option<ConnectionResult> {
     // Try to parse as JSON first (modern KIS API format)
     if text.trim().starts_with('{') {
@@ -352,6 +354,26 @@ async fn handle_msg(
                 asks,
                 bids,
             };
+
+            // Filter out invalid orderbooks (zero prices during market transitions)
+            if !standardized.has_valid_prices() {
+                debug!(
+                    target: "kinvest",
+                    symbol = %extracted_code,
+                    "Skipping snapshot with zero prices (market transition)"
+                );
+                return None;
+            }
+
+            // Skip if orderbook is identical to previous one
+            if let Some(ref last) = last_snapshot {
+                if standardized.is_same_data(last) {
+                    return None;
+                }
+            }
+
+            // Update cache with current snapshot
+            *last_snapshot = Some(standardized.clone());
 
             if let Err(e) = db.save_snapshot(&standardized).await {
                 error!(

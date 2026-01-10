@@ -70,7 +70,21 @@ setup_local() {
         echo -e "${GREEN}✅ Database created with TimescaleDB extension${NC}"
     else
         echo -e "${GREEN}✅ Database already exists${NC}"
+        # Ensure TimescaleDB extension is enabled
+        psql -d "$PGDATABASE" -c "CREATE EXTENSION IF NOT EXISTS timescaledb CASCADE;" 2>/dev/null || true
     fi
+
+    # Verify hypertable setup (app handles creation, this just reports status)
+    echo "📊 Checking hypertable status..."
+    psql -d "$PGDATABASE" -t -c "
+        SELECT CASE
+            WHEN EXISTS (SELECT 1 FROM timescaledb_information.hypertables WHERE hypertable_name = 'snapshots')
+            THEN 'Hypertable: snapshots ✓'
+            WHEN EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name = 'snapshots')
+            THEN 'Warning: snapshots exists as regular table (will migrate on app start)'
+            ELSE 'Table: snapshots (will be created on app start)'
+        END;
+    " 2>/dev/null || echo "   (Run 'cargo run' to initialize tables)"
 
     # Configure User and Permissions (Always run this to ensure correctness)
     echo "👤 Configuring user permissions..."

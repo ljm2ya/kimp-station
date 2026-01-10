@@ -39,7 +39,22 @@ pub struct OrderbookSnapshot {
     pub bids: Vec<OrderbookItem>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+impl OrderbookSnapshot {
+    /// Check if the orderbook has valid prices (non-zero best bid/ask)
+    /// Returns false for sparse orderbooks during market transitions
+    pub fn has_valid_prices(&self) -> bool {
+        let valid_bid = self.bids.first().map_or(false, |b| b.price > 0.0);
+        let valid_ask = self.asks.first().map_or(false, |a| a.price > 0.0);
+        valid_bid && valid_ask
+    }
+
+    /// Check if orderbook data is identical (ignores timestamp)
+    pub fn is_same_data(&self, other: &Self) -> bool {
+        self.symbol == other.symbol && self.asks == other.asks && self.bids == other.bids
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct OrderbookItem {
     pub price: f64,
     pub size: f64,

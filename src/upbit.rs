@@ -122,6 +122,16 @@ async fn handle_msg(text: &str, db: &Arc<Db>) {
                 bids,
             };
 
+            // Filter out invalid orderbooks (zero prices)
+            if !standardized.has_valid_prices() {
+                debug!(
+                    target: "upbit",
+                    symbol = %ob.code,
+                    "Skipping snapshot with zero prices"
+                );
+                return;
+            }
+
             if let Err(e) = db.save_snapshot(&standardized).await {
                 error!(
                     target: "upbit",

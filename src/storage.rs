@@ -19,32 +19,75 @@ impl Db {
             .execute(&pool)
             .await?;
 
-        // Create regular table first
-        sqlx::query(
-            r#"
-            CREATE TABLE IF NOT EXISTS snapshots (
-                time TIMESTAMPTZ NOT NULL,
-                timestamp BIGINT NOT NULL,
-                source VARCHAR(50) NOT NULL,
-                symbol VARCHAR(50) NOT NULL,
-                data JSONB NOT NULL
-            );
-            "#,
-        )
-        .execute(&pool)
-        .await?;
-
-        // Convert to hypertable with 24-hour chunks
-        // Use DO block to handle "already a hypertable" error gracefully
+        // Create hypertable (handles migration from non-hypertable if needed)
         sqlx::query(
             r#"
             DO $$
+            DECLARE
+                is_hypertable BOOLEAN;
+                table_exists BOOLEAN;
+                has_data BOOLEAN;
             BEGIN
-                IF NOT EXISTS (
+                -- Check if table exists
+                SELECT EXISTS (
+                    SELECT 1 FROM information_schema.tables
+                    WHERE table_name = 'snapshots' AND table_schema = 'public'
+                ) INTO table_exists;
+
+                -- Check if it's already a hypertable
+                SELECT EXISTS (
                     SELECT 1 FROM timescaledb_information.hypertables
                     WHERE hypertable_name = 'snapshots'
-                ) THEN
+                ) INTO is_hypertable;
+
+                IF NOT table_exists THEN
+                    -- Create fresh table and hypertable
+                    CREATE TABLE snapshots (
+                        time TIMESTAMPTZ NOT NULL,
+                        timestamp BIGINT NOT NULL,
+                        source VARCHAR(50) NOT NULL,
+                        symbol VARCHAR(50) NOT NULL,
+                        data JSONB NOT NULL
+                    );
                     PERFORM create_hypertable('snapshots', 'time', chunk_time_interval => INTERVAL '24 hours');
+                    RAISE NOTICE 'Created new hypertable: snapshots';
+
+                ELSIF NOT is_hypertable THEN
+                    -- Table exists but is not a hypertable - need to migrate
+                    SELECT EXISTS (SELECT 1 FROM snapshots LIMIT 1) INTO has_data;
+
+                    IF has_data THEN
+                        -- Migrate existing data
+                        RAISE NOTICE 'Migrating existing table to hypertable...';
+                        ALTER TABLE snapshots RENAME TO snapshots_old;
+
+                        CREATE TABLE snapshots (
+                            time TIMESTAMPTZ NOT NULL,
+                            timestamp BIGINT NOT NULL,
+                            source VARCHAR(50) NOT NULL,
+                            symbol VARCHAR(50) NOT NULL,
+                            data JSONB NOT NULL
+                        );
+                        PERFORM create_hypertable('snapshots', 'time', chunk_time_interval => INTERVAL '24 hours');
+
+                        INSERT INTO snapshots SELECT * FROM snapshots_old;
+                        DROP TABLE snapshots_old;
+                        RAISE NOTICE 'Migration complete';
+                    ELSE
+                        -- Empty table, just drop and recreate
+                        DROP TABLE snapshots;
+                        CREATE TABLE snapshots (
+                            time TIMESTAMPTZ NOT NULL,
+                            timestamp BIGINT NOT NULL,
+                            source VARCHAR(50) NOT NULL,
+                            symbol VARCHAR(50) NOT NULL,
+                            data JSONB NOT NULL
+                        );
+                        PERFORM create_hypertable('snapshots', 'time', chunk_time_interval => INTERVAL '24 hours');
+                        RAISE NOTICE 'Recreated empty table as hypertable';
+                    END IF;
+                ELSE
+                    RAISE NOTICE 'Hypertable snapshots already exists';
                 END IF;
             END $$;
             "#,
@@ -65,7 +108,30 @@ impl Db {
             .execute(&pool)
             .await?;
 
-        // Enable compression on chunks older than 7 days
+        // Enable compression on the hypertable
+        sqlx::query(
+            r#"
+            DO $$
+            BEGIN
+                -- Enable compression if not already enabled
+                IF NOT EXISTS (
+                    SELECT 1 FROM timescaledb_information.hypertables
+                    WHERE hypertable_name = 'snapshots' AND compression_enabled = true
+                ) THEN
+                    ALTER TABLE snapshots SET (
+                        timescaledb.compress,
+                        timescaledb.compress_segmentby = 'source, symbol',
+                        timescaledb.compress_orderby = 'time DESC'
+                    );
+                END IF;
+            END $$;
+            "#,
+        )
+        .execute(&pool)
+        .await
+        .ok();
+
+        // Add compression policy for chunks older than 7 days
         sqlx::query(
             r#"
             SELECT add_compression_policy('snapshots', INTERVAL '7 days', if_not_exists => true);
@@ -73,7 +139,7 @@ impl Db {
         )
         .execute(&pool)
         .await
-        .ok(); // Ignore errors if policy already exists
+        .ok();
 
         info!(target: "storage", "TimescaleDB initialized with 24h chunks and compression enabled");
 
