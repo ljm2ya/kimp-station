@@ -32,7 +32,12 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let db = Arc::new(Db::new(&database_url).await?);
 
     // Start Upbit (runs 24/7)
-    let upbit_symbols = vec!["KRW-USDT".to_string()];
+    let upbit_symbols: Vec<String> = env::var("UPBIT_SYMBOLS")
+        .unwrap_or_else(|_| "KRW-USDT,KRW-BTC,KRW-ETH,KRW-XRP,BTC-USDT,USDT-BTC".to_string())
+        .split(',')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
     if let Err(e) = upbit::subscribe(upbit_symbols, db.clone()).await {
         error!(error = %e, "Failed to start Upbit");
     }
