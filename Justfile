@@ -20,6 +20,7 @@ start:
         "cfg:paths.plugins=$PWD/.grafana-data/plugins" \
         "cfg:paths.provisioning=$PWD/grafana/provisioning" \
         "cfg:server.http_port=$GRAFANA_PORT" \
+        "cfg:server.http_addr=0.0.0.0" \
         "cfg:security.admin_user=admin" \
         "cfg:security.admin_password=admin" \
         "cfg:users.allow_sign_up=false" \
@@ -45,6 +46,8 @@ stop:
     pkill -f "cargo run.*kimp" 2>/dev/null || true
     echo "Stopped all services"
 
+restart: stop start
+
 # Start Grafana dashboard
 grafana:
     #!/usr/bin/env bash
@@ -62,6 +65,7 @@ grafana:
         "cfg:paths.plugins=$PWD/.grafana-data/plugins" \
         "cfg:paths.provisioning=$PWD/grafana/provisioning" \
         "cfg:server.http_port=$GRAFANA_PORT" \
+        "cfg:server.http_addr=0.0.0.0" \
         "cfg:security.admin_user=admin" \
         "cfg:security.admin_password=admin" \
         "cfg:users.allow_sign_up=false"
