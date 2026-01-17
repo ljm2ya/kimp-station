@@ -2,6 +2,7 @@ mod storage;
 mod types;
 mod upbit;
 mod kinvest;
+mod binance;
 
 use std::error::Error;
 use std::sync::Arc;
@@ -41,6 +42,15 @@ async fn main() -> Result<(), Box<dyn Error>> {
     if let Err(e) = upbit::subscribe(upbit_symbols, db.clone()).await {
         error!(error = %e, "Failed to start Upbit");
     }
+
+    // Start Binance (runs 24/7)
+    let binance_symbols: Vec<String> = env::var("BINANCE_SYMBOLS")
+        .unwrap_or_else(|_| "BTCUSDT,ETHUSDT,XRPUSDT".to_string())
+        .split(',')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+    binance::subscribe(binance_symbols, db.clone()).await;
 
     // Get Kinvest configuration
     let futures_code = env::var("KINVEST_FUTURES_CODE").unwrap_or_else(|_| "A75601".to_string());

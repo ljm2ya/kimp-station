@@ -94,3 +94,46 @@ pub struct TradeSnapshot {
     pub timestamp: i64,
     pub trade_timestamp: i64,
 }
+
+// ============================================
+// Binance Types
+// ============================================
+
+/// Binance trade stream message
+/// Stream: <symbol>@trade
+#[derive(Debug, Deserialize, Serialize)]
+pub struct BinanceTrade {
+    #[serde(rename = "e")]
+    pub event_type: String,
+    #[serde(rename = "E")]
+    pub event_time: i64,
+    #[serde(rename = "s")]
+    pub symbol: String,
+    #[serde(rename = "t")]
+    pub trade_id: i64,
+    #[serde(rename = "p")]
+    pub price: String,
+    #[serde(rename = "q")]
+    pub quantity: String,
+    #[serde(rename = "T")]
+    pub trade_time: i64,
+    #[serde(rename = "m")]
+    pub is_buyer_maker: bool,
+}
+
+/// Binance partial depth stream message
+/// Stream: <symbol>@depth<levels> or <symbol>@depth<levels>@100ms
+#[derive(Debug, Deserialize, Serialize)]
+pub struct BinanceDepth {
+    #[serde(rename = "lastUpdateId")]
+    pub last_update_id: i64,
+    pub bids: Vec<[String; 2]>,  // [price, quantity]
+    pub asks: Vec<[String; 2]>,  // [price, quantity]
+}
+
+/// Combined stream wrapper for Binance
+#[derive(Debug, Deserialize, Serialize)]
+pub struct BinanceStreamWrapper {
+    pub stream: String,
+    pub data: serde_json::Value,
+}

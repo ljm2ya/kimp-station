@@ -1,11 +1,13 @@
 # Kimp Station
 
-Real-time market data collector for **Upbit** (KRW-USDT) and **Korea Investment** (Commodity Futures) using WebSockets and TimescaleDB.
+Real-time market data collector for **Upbit**, **Binance**, and **Korea Investment** (Commodity Futures) using WebSockets and TimescaleDB.
 
 ## Features
 
 - **Upbit Orderbook**: Real-time orderbook snapshots (24/7).
 - **Upbit Trade**: Real-time trade execution data with `isOnlyRealtime` mode.
+- **Binance Orderbook**: Partial depth streams (20 levels @ 100ms).
+- **Binance Trade**: Real-time trade streams for spot markets.
 - **Kinvest**: Dual subscription to day/night markets with server-managed hours.
 - **Storage**: TimescaleDB hypertables with 24h chunks and auto-compression.
 - **Resilience**: Heartbeat-enabled WebSocket connections.
@@ -104,6 +106,7 @@ To allow external connections (e.g., for visualization tools like Grafana/Tablea
 ## Market Hours
 
 - **Upbit**: 24/7.
+- **Binance**: 24/7.
 - **Kinvest Day**: 08:45-15:45 KST (`H0CFASP0`).
 - **Kinvest Night**: 18:00-06:00 KST (`H0MFASP0`).
 
@@ -231,3 +234,40 @@ You can interactively query the database using `pgcli` (pre-installed in the Nix
    GROUP BY bucket, code
    ORDER BY bucket DESC;
    ```
+
+## Grafana Dashboard
+
+A pre-configured Grafana dashboard is included for visualizing market data.
+
+### Quick Start
+
+```bash
+# Start Grafana (requires Docker)
+docker compose up -d
+
+# Access dashboard
+open http://localhost:3000
+```
+
+**Default credentials:** `admin` / `admin`
+
+### Dashboard Features
+
+- **Price Charts**: Real-time price tracking for Binance (USDT) and Upbit (KRW)
+- **Trade Volume**: Buy/sell volume visualization by exchange
+- **Trade Count**: Transaction frequency per symbol
+- **Orderbook Spread**: Bid-ask spread percentage across exchanges
+- **Recent Trades**: Live trade feed with color-coded buy/sell indicators
+- **Statistics**: Hourly trade and snapshot counts by source
+
+### Configuration
+
+The datasource is pre-configured to connect to the local TimescaleDB instance. If your database credentials differ from the defaults, update:
+
+```
+grafana/provisioning/datasources/timescaledb.yml
+```
+
+### Customization
+
+Dashboards are stored in `grafana/dashboards/` and can be modified through the Grafana UI (changes are saved automatically).
