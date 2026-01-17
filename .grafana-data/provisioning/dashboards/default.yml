@@ -10,4 +10,4 @@ providers:
     updateIntervalSeconds: 30
     allowUiUpdates: true
     options:
-      path: grafana/dashboards
+      path: dashboards
