@@ -1,5 +1,24 @@
 # Kimp Station commands
 
+# Start everything (Grafana + Scraper)
+start:
+    #!/usr/bin/env bash
+    echo "Starting Kimp Station..."
+    just grafana &
+    sleep 2
+    just run-release &
+    echo ""
+    echo "✓ Grafana: http://localhost:3001 (admin/admin)"
+    echo "✓ Scraper: Running in background"
+    echo ""
+    echo "Stop with: just stop"
+
+# Stop everything
+stop:
+    @pkill -f "grafana server" 2>/dev/null || true
+    @pkill -f "kimp-station" 2>/dev/null || true
+    @echo "Stopped all services"
+
 # Start Grafana dashboard
 grafana:
     #!/usr/bin/env bash
