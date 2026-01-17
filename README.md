@@ -242,12 +242,10 @@ A pre-configured Grafana dashboard is included for visualizing market data.
 ### Quick Start
 
 ```bash
-# Start Grafana (requires Docker)
-docker compose up -d
-
-# Access dashboard
-open http://localhost:3000
+just grafana
 ```
+
+Opens at http://localhost:3000
 
 **Default credentials:** `admin` / `admin`
 
