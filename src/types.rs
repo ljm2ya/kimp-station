@@ -59,3 +59,38 @@ pub struct OrderbookItem {
     pub price: f64,
     pub size: f64,
 }
+
+// ============================================
+// Trade Types
+// ============================================
+
+/// Raw Upbit trade format (SIMPLE mode)
+#[derive(Debug, Deserialize, Serialize)]
+pub struct UpbitTrade {
+    #[serde(rename = "ty")]
+    pub type_: String,
+    #[serde(rename = "cd")]
+    pub code: String,
+    #[serde(rename = "tp")]
+    pub trade_price: f64,
+    #[serde(rename = "tv")]
+    pub trade_volume: f64,
+    #[serde(rename = "ab")]
+    pub ask_bid: String,
+    #[serde(rename = "tms")]
+    pub timestamp: i64,
+    #[serde(rename = "ttms")]
+    pub trade_timestamp: i64,
+}
+
+/// Standardized trade snapshot for storage
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TradeSnapshot {
+    pub source: String,
+    pub code: String,
+    pub trade_price: f64,
+    pub trade_volume: f64,
+    pub ask_bid: String,
+    pub timestamp: i64,
+    pub trade_timestamp: i64,
+}

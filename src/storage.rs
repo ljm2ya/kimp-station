@@ -1,7 +1,7 @@
 use sqlx::{postgres::PgPoolOptions, Pool, Postgres};
 use std::error::Error;
 use tracing::info;
-use crate::types::OrderbookSnapshot;
+use crate::types::{OrderbookSnapshot, TradeSnapshot};
 
 pub struct Db {
     pool: Pool<Postgres>,
@@ -141,7 +141,142 @@ impl Db {
         .await
         .ok();
 
-        info!(target: "storage", "TimescaleDB initialized with 24h chunks and compression enabled");
+        info!(target: "storage", "TimescaleDB snapshots initialized with 24h chunks and compression enabled");
+
+        // ============================================
+        // Create trades hypertable for trade data
+        // ============================================
+        sqlx::query(
+            r#"
+            DO $$
+            DECLARE
+                is_hypertable BOOLEAN;
+                table_exists BOOLEAN;
+                has_data BOOLEAN;
+            BEGIN
+                -- Check if table exists
+                SELECT EXISTS (
+                    SELECT 1 FROM information_schema.tables
+                    WHERE table_name = 'trades' AND table_schema = 'public'
+                ) INTO table_exists;
+
+                -- Check if it's already a hypertable
+                SELECT EXISTS (
+                    SELECT 1 FROM timescaledb_information.hypertables
+                    WHERE hypertable_name = 'trades'
+                ) INTO is_hypertable;
+
+                IF NOT table_exists THEN
+                    -- Create fresh table and hypertable
+                    CREATE TABLE trades (
+                        time TIMESTAMPTZ NOT NULL,
+                        source VARCHAR(50) NOT NULL,
+                        code VARCHAR(50) NOT NULL,
+                        trade_price DOUBLE PRECISION NOT NULL,
+                        trade_volume DOUBLE PRECISION NOT NULL,
+                        ask_bid VARCHAR(10) NOT NULL,
+                        timestamp BIGINT NOT NULL,
+                        trade_timestamp BIGINT NOT NULL
+                    );
+                    PERFORM create_hypertable('trades', 'time', chunk_time_interval => INTERVAL '24 hours');
+                    RAISE NOTICE 'Created new hypertable: trades';
+
+                ELSIF NOT is_hypertable THEN
+                    -- Table exists but is not a hypertable - need to migrate
+                    SELECT EXISTS (SELECT 1 FROM trades LIMIT 1) INTO has_data;
+
+                    IF has_data THEN
+                        -- Migrate existing data
+                        RAISE NOTICE 'Migrating existing trades table to hypertable...';
+                        ALTER TABLE trades RENAME TO trades_old;
+
+                        CREATE TABLE trades (
+                            time TIMESTAMPTZ NOT NULL,
+                            source VARCHAR(50) NOT NULL,
+                            code VARCHAR(50) NOT NULL,
+                            trade_price DOUBLE PRECISION NOT NULL,
+                            trade_volume DOUBLE PRECISION NOT NULL,
+                            ask_bid VARCHAR(10) NOT NULL,
+                            timestamp BIGINT NOT NULL,
+                            trade_timestamp BIGINT NOT NULL
+                        );
+                        PERFORM create_hypertable('trades', 'time', chunk_time_interval => INTERVAL '24 hours');
+
+                        INSERT INTO trades SELECT * FROM trades_old;
+                        DROP TABLE trades_old;
+                        RAISE NOTICE 'Migration complete';
+                    ELSE
+                        -- Empty table, just drop and recreate
+                        DROP TABLE trades;
+                        CREATE TABLE trades (
+                            time TIMESTAMPTZ NOT NULL,
+                            source VARCHAR(50) NOT NULL,
+                            code VARCHAR(50) NOT NULL,
+                            trade_price DOUBLE PRECISION NOT NULL,
+                            trade_volume DOUBLE PRECISION NOT NULL,
+                            ask_bid VARCHAR(10) NOT NULL,
+                            timestamp BIGINT NOT NULL,
+                            trade_timestamp BIGINT NOT NULL
+                        );
+                        PERFORM create_hypertable('trades', 'time', chunk_time_interval => INTERVAL '24 hours');
+                        RAISE NOTICE 'Recreated empty table as hypertable';
+                    END IF;
+                ELSE
+                    RAISE NOTICE 'Hypertable trades already exists';
+                END IF;
+            END $$;
+            "#,
+        )
+        .execute(&pool)
+        .await?;
+
+        // Create indexes for trades table
+        sqlx::query("CREATE INDEX IF NOT EXISTS idx_trades_timestamp ON trades (timestamp);")
+            .execute(&pool)
+            .await?;
+
+        sqlx::query("CREATE INDEX IF NOT EXISTS idx_trades_source ON trades (source);")
+            .execute(&pool)
+            .await?;
+
+        sqlx::query("CREATE INDEX IF NOT EXISTS idx_trades_code ON trades (code);")
+            .execute(&pool)
+            .await?;
+
+        // Enable compression on trades hypertable
+        sqlx::query(
+            r#"
+            DO $$
+            BEGIN
+                -- Enable compression if not already enabled
+                IF NOT EXISTS (
+                    SELECT 1 FROM timescaledb_information.hypertables
+                    WHERE hypertable_name = 'trades' AND compression_enabled = true
+                ) THEN
+                    ALTER TABLE trades SET (
+                        timescaledb.compress,
+                        timescaledb.compress_segmentby = 'source, code',
+                        timescaledb.compress_orderby = 'time DESC'
+                    );
+                END IF;
+            END $$;
+            "#,
+        )
+        .execute(&pool)
+        .await
+        .ok();
+
+        // Add compression policy for trades chunks older than 7 days
+        sqlx::query(
+            r#"
+            SELECT add_compression_policy('trades', INTERVAL '7 days', if_not_exists => true);
+            "#,
+        )
+        .execute(&pool)
+        .await
+        .ok();
+
+        info!(target: "storage", "TimescaleDB trades initialized with 24h chunks and compression enabled");
 
         Ok(Db { pool })
     }
@@ -174,9 +309,35 @@ impl Db {
         Ok(())
     }
 
+    pub async fn save_trade(&self, trade: &TradeSnapshot) -> Result<(), Box<dyn Error>> {
+        // Convert timestamp (milliseconds) to TIMESTAMPTZ
+        let time = chrono::DateTime::from_timestamp_millis(trade.timestamp)
+            .unwrap_or_else(|| chrono::Utc::now());
+
+        sqlx::query(
+            r#"
+            INSERT INTO trades (time, source, code, trade_price, trade_volume, ask_bid, timestamp, trade_timestamp)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+            "#,
+        )
+        .bind(time)
+        .bind(&trade.source)
+        .bind(&trade.code)
+        .bind(trade.trade_price)
+        .bind(trade.trade_volume)
+        .bind(&trade.ask_bid)
+        .bind(trade.timestamp)
+        .bind(trade.trade_timestamp)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(())
+    }
+
     pub async fn get_stats(&self) -> Result<(), Box<dyn Error>> {
         use sqlx::Row;
 
+        // Snapshots stats
         let rows = sqlx::query(
             r#"
             SELECT source, COUNT(*) as count, MAX(timestamp) as latest
@@ -187,7 +348,7 @@ impl Db {
         .fetch_all(&self.pool)
         .await?;
 
-        info!(target: "storage", "Database Statistics:");
+        info!(target: "storage", "Database Statistics - Snapshots:");
         for row in rows {
             let source: String = row.get("source");
             let count: i64 = row.get("count");
@@ -197,7 +358,32 @@ impl Db {
                 source = %source,
                 count = count,
                 latest_timestamp = latest,
-                "Source stats"
+                "Snapshot stats"
+            );
+        }
+
+        // Trades stats
+        let trade_rows = sqlx::query(
+            r#"
+            SELECT source, COUNT(*) as count, MAX(timestamp) as latest
+            FROM trades
+            GROUP BY source
+            "#
+        )
+        .fetch_all(&self.pool)
+        .await?;
+
+        info!(target: "storage", "Database Statistics - Trades:");
+        for row in trade_rows {
+            let source: String = row.get("source");
+            let count: i64 = row.get("count");
+            let latest: i64 = row.get("latest");
+            info!(
+                target: "storage",
+                source = %source,
+                count = count,
+                latest_timestamp = latest,
+                "Trade stats"
             );
         }
 

@@ -4,9 +4,10 @@ Real-time market data collector for **Upbit** (KRW-USDT) and **Korea Investment*
 
 ## Features
 
-- **Upbit**: Subscribes to `KRW-USDT` (24/7).
+- **Upbit Orderbook**: Real-time orderbook snapshots (24/7).
+- **Upbit Trade**: Real-time trade execution data with `isOnlyRealtime` mode.
 - **Kinvest**: Dual subscription to day/night markets with server-managed hours.
-- **Storage**: TimescaleDB hypertable with 24h chunks and auto-compression.
+- **Storage**: TimescaleDB hypertables with 24h chunks and auto-compression.
 - **Resilience**: Heartbeat-enabled WebSocket connections.
 - **Data Quality**: Filters zero-price snapshots (market transitions) and duplicate orderbooks.
 
@@ -108,7 +109,9 @@ To allow external connections (e.g., for visualization tools like Grafana/Tablea
 
 ## Database Schema
 
-Using TimescaleDB hypertable:
+Using TimescaleDB hypertables:
+
+### Orderbook Snapshots
 
 ```sql
 CREATE TABLE snapshots (
@@ -128,12 +131,37 @@ The `data` column stores efficiently queryable JSON:
 
 ```json
 {
-  "symbol": "...",
-  "time": "...",
-  "asks": [{ "price": "...", "vol": "..." }, ...],
-  "bids": [{ "price": "...", "vol": "..." }, ...]
+  "asks": [{ "price": 1450.5, "size": 100.0 }, ...],
+  "bids": [{ "price": 1449.5, "size": 150.0 }, ...]
 }
 ```
+
+### Trade Executions
+
+```sql
+CREATE TABLE trades (
+    time TIMESTAMPTZ NOT NULL,
+    source VARCHAR(50) NOT NULL,
+    code VARCHAR(50) NOT NULL,
+    trade_price DOUBLE PRECISION NOT NULL,
+    trade_volume DOUBLE PRECISION NOT NULL,
+    ask_bid VARCHAR(10) NOT NULL,  -- "ASK" or "BID"
+    timestamp BIGINT NOT NULL,
+    trade_timestamp BIGINT NOT NULL
+);
+
+SELECT create_hypertable('trades', 'time', chunk_time_interval => INTERVAL '24 hours');
+CREATE INDEX idx_trades_timestamp ON trades (timestamp);
+CREATE INDEX idx_trades_code ON trades (code);
+SELECT add_compression_policy('trades', INTERVAL '7 days');
+```
+
+Trade fields:
+- `trade_price`: Execution price
+- `trade_volume`: Execution volume
+- `ask_bid`: Trade direction ("ASK" = sell, "BID" = buy)
+- `timestamp`: Server timestamp (ms)
+- `trade_timestamp`: Actual trade execution timestamp (ms)
 
 ## Querying Data
 
@@ -169,5 +197,37 @@ You can interactively query the database using `pgcli` (pre-installed in the Nix
    FROM snapshots
    WHERE symbol = 'KRW-USDT'
    GROUP BY bucket
+   ORDER BY bucket DESC;
+   ```
+
+   **View latest trades:**
+   ```sql
+   SELECT time, code, trade_price, trade_volume, ask_bid
+   FROM trades
+   ORDER BY time DESC
+   LIMIT 10;
+   ```
+
+   **Trade volume by direction (1-minute buckets):**
+   ```sql
+   SELECT time_bucket('1 minute', time) AS bucket,
+          code,
+          ask_bid,
+          SUM(trade_volume) AS total_volume,
+          COUNT(*) AS trade_count
+   FROM trades
+   WHERE code = 'KRW-BTC'
+   GROUP BY bucket, code, ask_bid
+   ORDER BY bucket DESC;
+   ```
+
+   **VWAP (Volume-Weighted Average Price):**
+   ```sql
+   SELECT time_bucket('5 minutes', time) AS bucket,
+          code,
+          SUM(trade_price * trade_volume) / SUM(trade_volume) AS vwap
+   FROM trades
+   WHERE code = 'KRW-BTC'
+   GROUP BY bucket, code
    ORDER BY bucket DESC;
    ```
