@@ -4,7 +4,7 @@
 grafana:
     docker compose up -d
     @echo ""
-    @echo "Grafana: http://localhost:3000"
+    @echo "Grafana: http://localhost:3001"
     @echo "Login: admin / admin"
 
 # Stop Grafana

@@ -245,7 +245,7 @@ A pre-configured Grafana dashboard is included for visualizing market data.
 just grafana
 ```
 
-Opens at http://localhost:3000
+Opens at http://localhost:3001
 
 **Default credentials:** `admin` / `admin`
 
