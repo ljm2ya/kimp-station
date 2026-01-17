@@ -26,9 +26,8 @@ pkgs.mkShell {
     # Database utilities
     pgcli  # Better PostgreSQL CLI
 
-    # Docker for Grafana
-    docker
-    docker-compose
+    # Grafana
+    grafana
 
     # Task runner
     just
@@ -55,6 +54,16 @@ pkgs.mkShell {
     # Run the universal setup script
     ./scripts/setup_timescaledb.sh
 
+    # Grafana environment setup
+    export GRAFANA_DATA="$PWD/.grafana-data"
+    mkdir -p "$GRAFANA_DATA/dashboards"
+
+    # Copy provisioning configs if not exists
+    if [ ! -d "$GRAFANA_DATA/provisioning" ]; then
+      cp -r "$PWD/grafana/provisioning" "$GRAFANA_DATA/"
+      cp "$PWD/grafana/dashboards/"*.json "$GRAFANA_DATA/dashboards/"
+    fi
+
     echo ""
     echo "📋 Available Commands:"
     echo "  just run            - Run the application"
@@ -63,11 +72,5 @@ pkgs.mkShell {
     echo "  pgcli               - Connect to Database"
     echo "  stop_db             - Stop PostgreSQL"
     echo ""
-
-    # Check if Docker daemon is accessible
-    if ! docker info &>/dev/null; then
-      echo "⚠️  Docker daemon not running. Start with: sudo systemctl start docker"
-      echo ""
-    fi
   '';
 }

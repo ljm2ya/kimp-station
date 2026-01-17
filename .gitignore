@@ -11,4 +11,4 @@ go_impl
 # Temporary files
 .tmp/
 **/*.log
-.DS_Store
+.DS_Store.grafana-data/
