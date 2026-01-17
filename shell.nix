@@ -25,6 +25,13 @@ pkgs.mkShell {
 
     # Database utilities
     pgcli  # Better PostgreSQL CLI
+
+    # Docker for Grafana
+    docker
+    docker-compose
+
+    # Task runner
+    just
   ];
 
   shellHook = ''
@@ -50,9 +57,17 @@ pkgs.mkShell {
 
     echo ""
     echo "📋 Available Commands:"
-    echo "  cargo run           - Run the application"
+    echo "  just run            - Run the application"
+    echo "  just grafana        - Start Grafana dashboard"
+    echo "  just grafana-stop   - Stop Grafana"
     echo "  pgcli               - Connect to Database"
-    echo "  stop_db             - Stop the PostgreSQL Database"
+    echo "  stop_db             - Stop PostgreSQL"
     echo ""
+
+    # Check if Docker daemon is accessible
+    if ! docker info &>/dev/null; then
+      echo "⚠️  Docker daemon not running. Start with: sudo systemctl start docker"
+      echo ""
+    fi
   '';
 }
