@@ -13,3 +13,4 @@ go_impl
 **/*.log
 .DS_Store
 .grafana-data/
+.scraper.log

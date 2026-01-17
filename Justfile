@@ -4,12 +4,31 @@
 start:
     #!/usr/bin/env bash
     echo "Starting Kimp Station..."
-    just grafana &
+
+    # Start Grafana
+    mkdir -p .grafana-data/dashboards .grafana-data/logs .grafana-data/plugins
+    cp -n grafana/dashboards/*.json .grafana-data/dashboards/ 2>/dev/null || true
+    nohup grafana server \
+        --homepath="$(dirname $(dirname $(which grafana)))/share/grafana" \
+        --config=/dev/null \
+        "cfg:paths.data=$PWD/.grafana-data" \
+        "cfg:paths.logs=$PWD/.grafana-data/logs" \
+        "cfg:paths.plugins=$PWD/.grafana-data/plugins" \
+        "cfg:paths.provisioning=$PWD/grafana/provisioning" \
+        "cfg:server.http_port=3001" \
+        "cfg:security.admin_user=admin" \
+        "cfg:security.admin_password=admin" \
+        "cfg:users.allow_sign_up=false" \
+        > .grafana-data/logs/stdout.log 2>&1 &
+
     sleep 2
-    just run-release &
+
+    # Start scraper
+    nohup cargo run --release > .scraper.log 2>&1 &
+
     echo ""
     echo "✓ Grafana: http://localhost:3001 (admin/admin)"
-    echo "✓ Scraper: Running in background"
+    echo "✓ Scraper: Running (log: .scraper.log)"
     echo ""
     echo "Stop with: just stop"
 
