@@ -1,8 +1,12 @@
 # Kimp Station commands
 
+set dotenv-load
+
 # Start everything (Grafana + Scraper)
 start:
     #!/usr/bin/env bash
+    set -a; source .env 2>/dev/null || true; set +a
+    GRAFANA_PORT=${GRAFANA_PORT:-3001}
     echo "Starting Kimp Station..."
 
     # Start Grafana
@@ -15,7 +19,7 @@ start:
         "cfg:paths.logs=$PWD/.grafana-data/logs" \
         "cfg:paths.plugins=$PWD/.grafana-data/plugins" \
         "cfg:paths.provisioning=$PWD/grafana/provisioning" \
-        "cfg:server.http_port=3001" \
+        "cfg:server.http_port=$GRAFANA_PORT" \
         "cfg:security.admin_user=admin" \
         "cfg:security.admin_password=admin" \
         "cfg:users.allow_sign_up=false" \
@@ -27,7 +31,7 @@ start:
     nohup cargo run --release > .scraper.log 2>&1 &
 
     echo ""
-    echo "✓ Grafana: http://localhost:3001 (admin/admin)"
+    echo "✓ Grafana: http://localhost:$GRAFANA_PORT (admin/admin)"
     echo "✓ Scraper: Running (log: .scraper.log)"
     echo ""
     echo "Stop with: just stop"
@@ -44,9 +48,11 @@ stop:
 # Start Grafana dashboard
 grafana:
     #!/usr/bin/env bash
+    set -a; source .env 2>/dev/null || true; set +a
+    GRAFANA_PORT=${GRAFANA_PORT:-3001}
     mkdir -p .grafana-data/dashboards .grafana-data/logs .grafana-data/plugins
     cp -n grafana/dashboards/*.json .grafana-data/dashboards/ 2>/dev/null || true
-    echo "Starting Grafana at http://localhost:3001"
+    echo "Starting Grafana at http://localhost:$GRAFANA_PORT"
     echo "Login: admin / admin"
     grafana server \
         --homepath="$(dirname $(dirname $(which grafana)))/share/grafana" \
@@ -55,7 +61,7 @@ grafana:
         "cfg:paths.logs=$PWD/.grafana-data/logs" \
         "cfg:paths.plugins=$PWD/.grafana-data/plugins" \
         "cfg:paths.provisioning=$PWD/grafana/provisioning" \
-        "cfg:server.http_port=3001" \
+        "cfg:server.http_port=$GRAFANA_PORT" \
         "cfg:security.admin_user=admin" \
         "cfg:security.admin_password=admin" \
         "cfg:users.allow_sign_up=false"
