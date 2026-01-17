@@ -23,6 +23,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         .with_timer(ChronoLocal::new("%Y-%m-%d %H:%M:%S%.3f".to_string()))
         .with_max_level(Level::INFO)
         .with_target(true)
+        .with_ansi(false)
         .init();
 
     info!("Starting kimp-station...");

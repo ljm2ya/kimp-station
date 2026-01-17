@@ -34,9 +34,12 @@ start:
 
 # Stop everything
 stop:
-    @pkill -f "grafana server" 2>/dev/null || true
-    @pkill -f "kimp-station" 2>/dev/null || true
-    @echo "Stopped all services"
+    #!/usr/bin/env bash
+    pkill -f "grafana server" 2>/dev/null || true
+    # Kill the kimp-station binary specifically (not matching postgres paths)
+    pgrep -f 'target/(release|debug)/kimp-station' | xargs -r kill 2>/dev/null || true
+    pkill -f "cargo run.*kimp" 2>/dev/null || true
+    echo "Stopped all services"
 
 # Start Grafana dashboard
 grafana:
