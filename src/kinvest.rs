@@ -7,7 +7,9 @@ use std::sync::Arc;
 use reqwest::Client;
 use std::env;
 use tokio::sync::mpsc;
+use tokio::time::{timeout, Duration};
 use tracing::{info, warn, error, debug};
+use chrono::{DateTime, Utc, Timelike, Datelike, Weekday};
 
 use crate::types::{OrderbookSnapshot, OrderbookItem};
 use crate::storage::Db;
@@ -21,6 +23,139 @@ const TR_NIGHTTIME_FUTURES_ORDERBOOK: &str = "H0MFASP0";
 
 // Error codes that require key refresh
 const ERR_INVALID_APPROVAL: &str = "OPSP0011";
+
+// Read timeout during trading hours (seconds)
+const READ_TIMEOUT_SECS: u64 = 60;
+
+/// Trading session for KOSPI futures
+/// Day session: Mon-Fri 08:45-15:45 KST
+/// Night session: Mon-Fri 18:00-06:00 KST (extends to Saturday morning)
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum TradingSession {
+    Day,
+    Night,
+    Closed,
+}
+
+impl TradingSession {
+    /// Determine trading session from UTC time
+    /// KST = UTC + 9 hours
+    pub fn from_utc(utc: DateTime<Utc>) -> Self {
+        // Convert to KST components
+        let kst_hour = (utc.hour() + 9) % 24;
+        let kst_minute = utc.minute();
+        let kst_time = kst_hour * 100 + kst_minute; // HHMM format
+
+        // Determine the KST weekday (may differ from UTC if past 15:00 UTC)
+        let kst_weekday = if utc.hour() >= 15 {
+            utc.weekday().succ()
+        } else {
+            utc.weekday()
+        };
+
+        // Check night session first (18:00-06:00 KST)
+        // Night session runs Mon 18:00 to Sat 06:00
+        let in_night_session = if kst_time >= 1800 {
+            // 18:00-24:00: valid Mon-Fri
+            matches!(kst_weekday, Weekday::Mon | Weekday::Tue | Weekday::Wed | Weekday::Thu | Weekday::Fri)
+        } else if kst_time < 600 {
+            // 00:00-06:00: valid Tue-Sat (continuation from previous night)
+            matches!(kst_weekday, Weekday::Tue | Weekday::Wed | Weekday::Thu | Weekday::Fri | Weekday::Sat)
+        } else {
+            false
+        };
+
+        if in_night_session {
+            return TradingSession::Night;
+        }
+
+        // Check day session (08:45-15:45 KST, Mon-Fri)
+        let in_day_session = kst_time >= 845 && kst_time < 1545 &&
+            matches!(kst_weekday, Weekday::Mon | Weekday::Tue | Weekday::Wed | Weekday::Thu | Weekday::Fri);
+
+        if in_day_session {
+            return TradingSession::Day;
+        }
+
+        TradingSession::Closed
+    }
+
+    /// Returns true if trading is allowed (not closed)
+    pub fn is_trading_allowed(&self) -> bool {
+        !matches!(self, TradingSession::Closed)
+    }
+
+    /// Calculate seconds until next market open
+    /// Returns None if already in trading hours
+    pub fn secs_until_next_open(utc: DateTime<Utc>) -> Option<u64> {
+        if Self::from_utc(utc).is_trading_allowed() {
+            return None;
+        }
+
+        // Convert to KST
+        let kst_hour = (utc.hour() + 9) % 24;
+        let kst_minute = utc.minute();
+        let kst_time = kst_hour * 100 + kst_minute;
+
+        let kst_weekday = if utc.hour() >= 15 {
+            utc.weekday().succ()
+        } else {
+            utc.weekday()
+        };
+
+        // Off-hours gaps:
+        // 1. 06:00-08:45 KST -> next open is 08:45 same day (day session)
+        // 2. 15:45-18:00 KST -> next open is 18:00 same day (night session)
+        // 3. Sat 06:00 - Mon 08:45 -> next open is Mon 08:45
+
+        let (target_hour, target_min, days_to_add): (u32, u32, i64) = match kst_weekday {
+            Weekday::Sat => {
+                if kst_time < 600 {
+                    // Still in night session territory but it's Saturday
+                    // Actually this should be trading, but if we're here it means closed
+                    // Next open: Monday 08:45
+                    (8, 45, 2)
+                } else {
+                    // Saturday after 06:00 -> Monday 08:45
+                    (8, 45, 2)
+                }
+            }
+            Weekday::Sun => {
+                // Sunday -> Monday 08:45
+                (8, 45, 1)
+            }
+            _ => {
+                // Weekday
+                if kst_time >= 600 && kst_time < 845 {
+                    // Between night end and day start -> 08:45 same day
+                    (8, 45, 0)
+                } else if kst_time >= 1545 && kst_time < 1800 {
+                    // Between day end and night start -> 18:00 same day
+                    (18, 0, 0)
+                } else {
+                    // Shouldn't reach here if from_utc is correct, but fallback to day session
+                    (8, 45, 1)
+                }
+            }
+        };
+
+        // Calculate seconds until target time
+        let current_secs = (kst_hour * 3600 + kst_minute * 60 + utc.second()) as i64;
+        let target_secs = (target_hour * 3600 + target_min * 60) as i64;
+
+        let mut diff = target_secs - current_secs + (days_to_add * 86400);
+        if diff <= 0 {
+            diff += 86400; // Add a day if we've passed the target
+        }
+
+        Some(diff as u64)
+    }
+}
+
+/// Check if current time is within trading hours
+pub fn is_trading_hour(utc_time: DateTime<Utc>) -> bool {
+    TradingSession::from_utc(utc_time).is_trading_allowed()
+}
 
 /// Connection result indicating whether to refresh the approval key
 #[derive(Debug)]
@@ -177,12 +312,36 @@ async fn connect_and_handle(
         tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
     }
 
-    // Reader loop
+    // Reader loop with timeout during trading hours
     let tx_reader = tx.clone();
     let mut result = ConnectionResult::Retry;
     let mut last_snapshot: Option<OrderbookSnapshot> = None;
 
-    while let Some(msg) = read.next().await {
+    loop {
+        let read_future = read.next();
+
+        // Apply timeout: short during trading hours, until next open during off-hours
+        let now = Utc::now();
+        let timeout_secs = if is_trading_hour(now) {
+            READ_TIMEOUT_SECS
+        } else {
+            // Sleep until next market open (+ small buffer)
+            TradingSession::secs_until_next_open(now).unwrap_or(READ_TIMEOUT_SECS) + 60
+        };
+
+        let msg = match timeout(Duration::from_secs(timeout_secs), read_future).await {
+            Ok(Some(msg)) => msg,
+            Ok(None) => break, // Stream ended
+            Err(_) => {
+                if is_trading_hour(Utc::now()) {
+                    warn!(target: "kinvest", "Read timeout ({}s) during trading hours - reconnecting", timeout_secs);
+                } else {
+                    info!(target: "kinvest", "Market opening soon - reconnecting to ensure fresh connection");
+                }
+                break;
+            }
+        };
+
         match msg {
             Ok(Message::Text(text)) => {
                 if let Some(msg_result) = handle_msg(&text, db, &tx_reader, &mut last_snapshot).await {
